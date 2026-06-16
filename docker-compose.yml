@@ -46,7 +46,7 @@ services:
 
   # Reverse proxy settup
   traefik:
-    image: traefik:v3.1
+    image: traefik:latest
     container_name: traefik
     restart: unless-stopped
     command:
