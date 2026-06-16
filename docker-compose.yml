@@ -1,8 +1,6 @@
 services:
   3xui:
-    build:
-      context: .
-      dockerfile: ./Dockerfile
+    image: rujhan/3x-ui:latest
     container_name: 3xui_app
     cap_add:
       - NET_ADMIN
