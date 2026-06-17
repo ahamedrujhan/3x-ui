@@ -13,6 +13,7 @@ services:
 
       # Hostname
       - traefik.http.routers.3xui.rule=Host(`3x.ruju.qzz.io`)
+      - traefik.tcp.routers.vless.rule=HostSNI(`*`) # Allow any sni
 
       #test
       # - traefik.http.routers.3xui.rule=Host(`localhost`)
@@ -52,6 +53,8 @@ services:
     command:
       # - --api.dashboard=true # to be commended in production
       # - --api.insecure=true # to be commended in production
+      - --log.level=INFO
+      - --accesslog=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
 
