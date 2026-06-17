@@ -4,6 +4,7 @@ import os
 import time
 import hashlib
 import logging
+import sqlite3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,7 +13,8 @@ logging.basicConfig(
 
 ACME_PATH = '/app/acme.json'
 CERTS_DIR = '/app/certs'
-CHECK_INTERVAL = 3600  # check every hour
+DB_PATH = '/app/db/x-ui.db'
+CHECK_INTERVAL = 3600
 
 
 def get_file_hash(path):
@@ -24,6 +26,7 @@ def get_file_hash(path):
 
 
 def extract_certs(acme_path, certs_dir):
+    extracted = []
     try:
         with open(acme_path) as f:
             data = json.load(f)
@@ -42,27 +45,94 @@ def extract_certs(acme_path, certs_dir):
                 cert_path = os.path.join(domain_dir, 'fullchain.pem')
                 key_path = os.path.join(domain_dir, 'privkey.pem')
 
-                cert_data = base64.b64decode(c['certificate']).decode()
-                key_data = base64.b64decode(c['key']).decode()
-
                 with open(cert_path, 'w') as f:
-                    f.write(cert_data)
+                    f.write(base64.b64decode(c['certificate']).decode())
 
                 with open(key_path, 'w') as f:
-                    f.write(key_data)
+                    f.write(base64.b64decode(c['key']).decode())
 
                 logging.info(f'Extracted cert for: {domain} → {domain_dir}')
+                extracted.append({
+                    'domain': domain,
+                    # Convert watcher container path → 3xui container path
+                    'cert': f'/root/cert/{domain}/fullchain.pem',
+                    'key': f'/root/cert/{domain}/privkey.pem'
+                })
 
     except Exception as e:
         logging.error(f'Failed to extract certs: {e}')
 
+    return extracted
+
+
+def update_xray_inbounds(db_path, extracted):
+    if not extracted:
+        return
+
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id, remark, stream_settings FROM inbounds")
+        rows = cursor.fetchall()
+
+        for row_id, remark, stream_json in rows:
+            try:
+                stream = json.loads(stream_json)
+                tls = stream.get('tlsSettings', {})
+                certs = tls.get('certificates', [])
+
+                if not certs:
+                    logging.info(f'Inbound {row_id} ({remark}) has no TLS certificates — skipping')
+                    continue
+
+                # Match cert by domain or just use first extracted
+                domain_info = extracted[0]
+                cert_file = domain_info['cert']
+                key_file = domain_info['key']
+
+                updated = False
+                for cert in certs:
+                    if cert.get('certificateFile') != cert_file or cert.get('keyFile') != key_file:
+                        cert['certificateFile'] = cert_file
+                        cert['keyFile'] = key_file
+                        updated = True
+
+                if updated:
+                    stream['tlsSettings']['certificates'] = certs
+                    cursor.execute(
+                        "UPDATE inbounds SET stream_settings = ? WHERE id = ?",
+                        (json.dumps(stream), row_id)
+                    )
+                    logging.info(f'Updated inbound {row_id} ({remark}) → {cert_file}')
+                else:
+                    logging.info(f'Inbound {row_id} ({remark}) cert paths already correct — no update needed')
+
+            except Exception as e:
+                logging.error(f'Failed to update inbound {row_id}: {e}')
+
+        conn.commit()
+        conn.close()
+        logging.info('Database updated successfully')
+
+    except Exception as e:
+        logging.error(f'Failed to connect to database: {e}')
+
 
 def main():
     logging.info('Starting cert watcher...')
+
+    # Wait for files to be ready
+    for path in [ACME_PATH, DB_PATH]:
+        while not os.path.exists(path):
+            logging.info(f'Waiting for {path}...')
+            time.sleep(5)
+
     last_hash = None
 
-    # Extract immediately on start
-    extract_certs(ACME_PATH, CERTS_DIR)
+    # Run immediately on start
+    extracted = extract_certs(ACME_PATH, CERTS_DIR)
+    update_xray_inbounds(DB_PATH, extracted)
     last_hash = get_file_hash(ACME_PATH)
 
     while True:
@@ -71,7 +141,8 @@ def main():
 
         if current_hash != last_hash:
             logging.info('acme.json changed — extracting new certs...')
-            extract_certs(ACME_PATH, CERTS_DIR)
+            extracted = extract_certs(ACME_PATH, CERTS_DIR)
+            update_xray_inbounds(DB_PATH, extracted)
             last_hash = current_hash
         else:
             logging.info('acme.json unchanged — no action needed')
