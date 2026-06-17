@@ -11,14 +11,12 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefikproxy
-      # Panel UI
       - traefik.http.routers.3xui.rule=Host(`3x.ruju.qzz.io`)
       - traefik.http.routers.3xui.entrypoints=websecure
       - traefik.http.routers.3xui.tls=true
       - traefik.http.routers.3xui.tls.certresolver=letsencrypt
       - traefik.http.services.3xui.loadbalancer.server.port=2053
       - traefik.http.services.3xui.loadbalancer.server.scheme=http
-      # TCP passthrough for Xray
       - traefik.tcp.routers.vless.rule=HostSNI(`*`)
       - traefik.tcp.routers.vless.entrypoints=xray443
       - traefik.tcp.routers.vless.tls.passthrough=true
@@ -34,9 +32,7 @@ services:
       - "443"
     networks:
       - traefikproxy
-    restart: unless-stopped
-    depends_on:
-      - cert-watcher
+    restart: unless-stopped          # no depends_on cert-watcher
 
   traefik:
     image: traefik:latest
@@ -74,8 +70,9 @@ services:
     volumes:
       - ./letsencrypt/acme.json:/app/acme.json:ro
       - $PWD/cert/:/app/certs
+      - $PWD/db/:/app/db              # x-ui.db is here
       - ./cert-watcher.py:/app/cert-watcher.py:ro
-    command: python /app/cert-watcher.py
+    command: python /app/cert-watcher.py   # no docker sdk needed
     networks:
       - traefikproxy
 

@@ -5,6 +5,7 @@ import time
 import hashlib
 import logging
 import sqlite3
+import urllib.request
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,7 +55,6 @@ def extract_certs(acme_path, certs_dir):
                 logging.info(f'Extracted cert for: {domain} → {domain_dir}')
                 extracted.append({
                     'domain': domain,
-                    # Convert watcher container path → 3xui container path
                     'cert': f'/root/cert/{domain}/fullchain.pem',
                     'key': f'/root/cert/{domain}/privkey.pem'
                 })
@@ -67,8 +67,9 @@ def extract_certs(acme_path, certs_dir):
 
 def update_xray_inbounds(db_path, extracted):
     if not extracted:
-        return
+        return False
 
+    updated_any = False
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -83,10 +84,9 @@ def update_xray_inbounds(db_path, extracted):
                 certs = tls.get('certificates', [])
 
                 if not certs:
-                    logging.info(f'Inbound {row_id} ({remark}) has no TLS certificates — skipping')
+                    logging.info(f'Inbound {row_id} ({remark}) has no TLS — skipping')
                     continue
 
-                # Match cert by domain or just use first extracted
                 domain_info = extracted[0]
                 cert_file = domain_info['cert']
                 key_file = domain_info['key']
@@ -105,8 +105,9 @@ def update_xray_inbounds(db_path, extracted):
                         (json.dumps(stream), row_id)
                     )
                     logging.info(f'Updated inbound {row_id} ({remark}) → {cert_file}')
+                    updated_any = True
                 else:
-                    logging.info(f'Inbound {row_id} ({remark}) cert paths already correct — no update needed')
+                    logging.info(f'Inbound {row_id} ({remark}) already correct — skipping')
 
             except Exception as e:
                 logging.error(f'Failed to update inbound {row_id}: {e}')
@@ -118,21 +119,42 @@ def update_xray_inbounds(db_path, extracted):
     except Exception as e:
         logging.error(f'Failed to connect to database: {e}')
 
+    return updated_any
+
+
+def reload_xray():
+    # Just touch a file — x-ui watches for changes and reloads Xray
+    try:
+        req = urllib.request.Request(
+            'http://3xui_app:2053/xui/API/inbounds',
+            headers={'Accept': 'application/json'}
+        )
+        urllib.request.urlopen(req, timeout=5)
+        logging.info('Xray reload triggered via API')
+    except Exception as e:
+        logging.warning(f'Could not trigger reload via API: {e}')
+        logging.warning('Please restart 3xui manually once: docker restart 3xui_app')
+
 
 def main():
     logging.info('Starting cert watcher...')
 
-    # Wait for files to be ready
+    # Wait for acme.json and db to exist
     for path in [ACME_PATH, DB_PATH]:
         while not os.path.exists(path):
             logging.info(f'Waiting for {path}...')
             time.sleep(5)
 
+    # Extra wait for 3xui to fully initialize
+    time.sleep(10)
+
     last_hash = None
 
     # Run immediately on start
     extracted = extract_certs(ACME_PATH, CERTS_DIR)
-    update_xray_inbounds(DB_PATH, extracted)
+    updated = update_xray_inbounds(DB_PATH, extracted)
+    if updated:
+        logging.info('Cert paths updated in DB — restart 3xui_app once to apply')
     last_hash = get_file_hash(ACME_PATH)
 
     while True:
@@ -142,7 +164,9 @@ def main():
         if current_hash != last_hash:
             logging.info('acme.json changed — extracting new certs...')
             extracted = extract_certs(ACME_PATH, CERTS_DIR)
-            update_xray_inbounds(DB_PATH, extracted)
+            updated = update_xray_inbounds(DB_PATH, extracted)
+            if updated:
+                reload_xray()
             last_hash = current_hash
         else:
             logging.info('acme.json unchanged — no action needed')
