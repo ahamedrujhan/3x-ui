@@ -16,6 +16,7 @@ services:
       - traefik.tcp.routers.vless.rule=HostSNI(`*`) # Allow any sni
       - traefik.tcp.routers.vless.entrypoints=xray443        # <-- dedicated entrypoint
       - traefik.tcp.routers.vless.tls.passthrough=true        # <-- Xray handles TLS, not Traefik
+      - traefik.tcp.routers.vless.service=vless  
       - traefik.tcp.services.vless.loadbalancer.server.port=443  # <-- Xray's actual port inside container
 
 
@@ -56,9 +57,9 @@ services:
     container_name: traefik
     restart: unless-stopped
     command:
-      # - --api.dashboard=true # to be commended in production
-      # - --api.insecure=true # to be commended in production
-      - --log.level=INFO
+      - --api.dashboard=true # to be commended in production
+      - --api.insecure=true # to be commended in production
+      - --log.level=DEBUG
       - --accesslog=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
@@ -84,7 +85,7 @@ services:
       - "80:80"
       - "443:443"
       - "8443:8443" 
-      # - "8080:8080" # to be commended in production
+      - "8080:8080" # to be commended in production
     networks:
       - traefikproxy
 
