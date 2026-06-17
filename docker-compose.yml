@@ -7,92 +7,76 @@ services:
       - NET_RAW
     volumes:
       - $PWD/db/:/etc/x-ui/
-      - $PWD/cert/:/root/cert/
+      - $PWD/cert/:/root/cert/        # certs-dumper writes here too
     labels:
       - traefik.enable=true
-
-      # Hostname
-      - traefik.http.routers.3xui.rule=Host(`3x.ruju.qzz.io`)
-      - traefik.tcp.routers.vless.rule=HostSNI(`*`) # Allow any sni
-      - traefik.tcp.routers.vless.entrypoints=xray443        # <-- dedicated entrypoint
-      - traefik.tcp.routers.vless.tls.passthrough=true        # <-- Xray handles TLS, not Traefik
-      - traefik.tcp.routers.vless.service=vless  
-      - traefik.tcp.services.vless.loadbalancer.server.port=443  # <-- Xray's actual port inside container
-
-
-      #test
-      # - traefik.http.routers.3xui.rule=Host(`localhost`)
-
-      # HTTPS only
-      - traefik.http.routers.3xui.entrypoints=websecure
-
-      # TLS
-      - traefik.http.routers.3xui.tls=true
-      - traefik.http.routers.3xui.tls.certresolver=letsencrypt
-
-      #test
-      # - traefik.http.routers.3xui.entrypoints=web
-
-      # network
       - traefik.docker.network=traefikproxy
 
-      # Internal 3x-ui port
+      # Panel UI
+      - traefik.http.routers.3xui.rule=Host(`3x.ruju.qzz.io`)
+      - traefik.http.routers.3xui.entrypoints=websecure
+      - traefik.http.routers.3xui.tls=true
+      - traefik.http.routers.3xui.tls.certresolver=letsencrypt
       - traefik.http.services.3xui.loadbalancer.server.port=2053
+      - traefik.http.services.3xui.loadbalancer.server.scheme=http  # panel is plain HTTP
+
+      # TCP passthrough for Xray
+      - traefik.tcp.routers.vless.rule=HostSNI(`*`)
+      - traefik.tcp.routers.vless.entrypoints=xray443
+      - traefik.tcp.routers.vless.tls.passthrough=true
+      - traefik.tcp.routers.vless.service=vless
+      - traefik.tcp.services.vless.loadbalancer.server.port=443
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
       XUI_ENABLE_FAIL2BAN: "true"
       XUI_INIT_WEB_BASE_PATH: "/"
-
     tty: true
     expose:
       - "2053"
-      - "443"   
+      - "443"
     networks:
       - traefikproxy
     restart: unless-stopped
+    depends_on:
+      - certs-dumper
 
-  # Reverse proxy settup
   traefik:
     image: traefik:latest
     container_name: traefik
     restart: unless-stopped
     command:
-      - --api.dashboard=true # to be commended in production
-      - --api.insecure=true # to be commended in production
-      - --log.level=DEBUG
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --log.level=INFO
       - --accesslog=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-
-     
-
-      # HTTP
       - --entrypoints.web.address=:80
-
-      # HTTPS
       - --entrypoints.websecure.address=:443
-
-      - --entrypoints.xray443.address=:8443 
-
-      # Let's Encrypt
+      - --entrypoints.xray443.address=:8443
       - --certificatesresolvers.letsencrypt.acme.email=rujhanbheem123@gmail.com
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
       - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
-      
-
     ports:
       - "80:80"
       - "443:443"
-      - "8443:8443" 
-      - "8080:8080" # to be commended in production
+      - "8443:8443"
+      - "8080:8080"
     networks:
       - traefikproxy
-
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
 
+  certs-dumper:
+    image: ldez/traefik-certs-dumper:v2.8.3
+    container_name: certs_dumper
+    entrypoint: sh -c "traefik-certs-dumper file --watch --source /app/acme.json --dest /app/certs --domain-subdir --crt-name fullchain --key-name privkey"
+    volumes:
+      - ./letsencrypt/acme.json:/app/acme.json:ro   # read-only acme.json
+      - $PWD/cert/:/app/certs                        # same folder 3xui mounts
+    restart: unless-stopped
 
 networks:
   traefikproxy:
