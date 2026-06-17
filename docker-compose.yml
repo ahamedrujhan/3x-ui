@@ -72,7 +72,8 @@ services:
   certs-dumper:
     image: ldez/traefik-certs-dumper:v2.8.3
     container_name: certs_dumper
-    entrypoint: sh -c "traefik-certs-dumper file --watch --source /app/acme.json --dest /app/certs --domain-subdir --crt-name fullchain --key-name privkey"
+    # entrypoint: sh -c "traefik-certs-dumper file --watch --source /app/acme.json --dest /app/certs --domain-subdir --crt-name fullchain --key-name privkey"
+    command: watch --version v2 --source /app/acme.json --dest /app/certs --domain-subdir --crt-name fullchain --key-name privkey
     volumes:
       - ./letsencrypt/acme.json:/app/acme.json:ro   # read-only acme.json
       - $PWD/cert/:/app/certs                        # same folder 3xui mounts
