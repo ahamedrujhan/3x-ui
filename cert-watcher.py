@@ -102,17 +102,15 @@ def update_xray_inbounds(db_path, extracted):
                 key_file = domain_info['key']
 
                 for cert in certs:
-                    old_cert = cert.get('certificateFile') or 'empty'  # handles None
-                    old_key = cert.get('keyFile') or 'empty'            # handles None
+                    old_cert = cert.get('certificateFile') or 'empty'
+                    old_key = cert.get('keyFile') or 'empty'
 
-                    # Fix if None, empty, or wrong path
                     if not cert.get('certificateFile') or not cert.get('keyFile'):
                         cert['certificateFile'] = cert_file
                         cert['keyFile'] = key_file
                         logging.info(f'Inbound {row_id} ({remark}) cert: {old_cert} → {cert_file}')
                         logging.info(f'Inbound {row_id} ({remark}) key:  {old_key} → {key_file}')
                     else:
-                        # Also overwrite if paths don't point to valid files
                         if not os.path.exists(cert.get('certificateFile', '')) or \
                            not os.path.exists(cert.get('keyFile', '')):
                             cert['certificateFile'] = cert_file
@@ -140,6 +138,7 @@ def update_xray_inbounds(db_path, extracted):
         logging.error(f'Failed to connect to database: {e}')
 
     return updated_any
+
 
 def docker_request(method, path, body=None):
     try:
@@ -184,7 +183,7 @@ def restart_3xui():
 
 def process_queue(queue, extracted_ref):
     if not queue:
-        return
+        return False
     tags = set()
     while queue:
         tags.add(queue.popleft())
@@ -192,6 +191,7 @@ def process_queue(queue, extracted_ref):
     updated = update_xray_inbounds(DB_PATH, extracted_ref['data'])
     if updated:
         restart_3xui()
+    return updated
 
 
 def stream_container_logs(extracted_ref, stop_event):
@@ -207,7 +207,7 @@ def stream_container_logs(extracted_ref, stop_event):
             sock.connect(DOCKER_SOCK)
             sock.settimeout(5)
 
-            since = int(time.time()) - 30  # look back 30 seconds on reconnect
+            since = int(time.time()) - 30  # look back 30s on reconnect
             request = (
                 f'GET /containers/{CONTAINER_NAME}/logs'
                 f'?follow=1&stdout=1&stderr=1&tail=0&since={since} HTTP/1.1\r\n'
@@ -215,7 +215,6 @@ def stream_container_logs(extracted_ref, stop_event):
             )
             sock.sendall(request.encode())
 
-            # Skip HTTP headers
             header = b''
             while b'\r\n\r\n' not in header:
                 header += sock.recv(1)
@@ -228,16 +227,26 @@ def stream_container_logs(extracted_ref, stop_event):
             buffer = b''
             while not stop_event.is_set():
 
-                # Check cooldown expiry
                 now = time.time()
                 if in_cooldown and now >= cooldown_until:
                     in_cooldown = False
-                    logging.info('Cooldown expired')
-                    if queue:
+                    logging.info('Cooldown expired — scanning DB for invalid certs...')
+
+                    # Always scan DB on cooldown expiry — catches missed errors
+                    updated = update_xray_inbounds(DB_PATH, extracted_ref['data'])
+                    if updated:
+                        logging.info('Invalid certs found after cooldown — restarting...')
+                        restart_3xui()
+                        queue.clear()
+                        cooldown_until = time.time() + COOLDOWN
+                        in_cooldown = True
+                    elif queue:
                         logging.info(f'Processing {len(queue)} queued error(s)...')
                         process_queue(queue, extracted_ref)
                         cooldown_until = time.time() + COOLDOWN
                         in_cooldown = True
+                    else:
+                        logging.info('No invalid certs found — all good')
 
                 try:
                     chunk = sock.recv(4096)
@@ -247,7 +256,6 @@ def stream_container_logs(extracted_ref, stop_event):
                 except socket.timeout:
                     continue
 
-                # Process lines
                 while b'\n' in buffer:
                     line, buffer = buffer.split(b'\n', 1)
                     log_line = line.decode(errors='ignore').strip()
@@ -255,7 +263,6 @@ def stream_container_logs(extracted_ref, stop_event):
                     if not log_line:
                         continue
 
-                    # Skip chunked transfer size lines (hex numbers)
                     try:
                         int(log_line, 16)
                         continue
