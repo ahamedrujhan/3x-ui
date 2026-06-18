@@ -73,6 +73,7 @@ services:
       - $PWD/cert/:/app/certs
       - $PWD/db/:/app/db              # x-ui.db is here
       - ./cert-watcher.py:/app/cert-watcher.py:ro
+      - /var/run/docker.sock:/var/run/docker.sock  # ← required
     command: python /app/cert-watcher.py   # no docker sdk needed
     networks:
       - traefikproxy
