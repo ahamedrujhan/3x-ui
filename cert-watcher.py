@@ -282,7 +282,7 @@ def main():
     log_thread.start()
 
     logging.info(f'Watching acme.json every {ACME_CHECK_INTERVAL}s')
-    logging.info(f'Watching 3xui logs for: "{ERROR_TRIGGER}"')
+    logging.info(f'Watching 3xui logs for: {ERROR_TRIGGERS}')
 
     # Main loop — only checks acme.json for renewal
     while True:
