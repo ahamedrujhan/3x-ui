@@ -94,6 +94,7 @@ def update_xray_inbounds(db_path, extracted):
                 certs = tls.get('certificates', [])
 
                 if not certs:
+                    logging.info(f'Inbound {row_id} ({remark}) has no TLS — skipping')
                     continue
 
                 domain_info = extracted[0]
@@ -101,12 +102,25 @@ def update_xray_inbounds(db_path, extracted):
                 key_file = domain_info['key']
 
                 for cert in certs:
-                    old_cert = cert.get('certificateFile', 'empty')
-                    old_key = cert.get('keyFile', 'empty')
-                    cert['certificateFile'] = cert_file
-                    cert['keyFile'] = key_file
-                    logging.info(f'Inbound {row_id} ({remark}) cert: {old_cert} → {cert_file}')
-                    logging.info(f'Inbound {row_id} ({remark}) key:  {old_key} → {key_file}')
+                    old_cert = cert.get('certificateFile') or 'empty'  # handles None
+                    old_key = cert.get('keyFile') or 'empty'            # handles None
+
+                    # Fix if None, empty, or wrong path
+                    if not cert.get('certificateFile') or not cert.get('keyFile'):
+                        cert['certificateFile'] = cert_file
+                        cert['keyFile'] = key_file
+                        logging.info(f'Inbound {row_id} ({remark}) cert: {old_cert} → {cert_file}')
+                        logging.info(f'Inbound {row_id} ({remark}) key:  {old_key} → {key_file}')
+                    else:
+                        # Also overwrite if paths don't point to valid files
+                        if not os.path.exists(cert.get('certificateFile', '')) or \
+                           not os.path.exists(cert.get('keyFile', '')):
+                            cert['certificateFile'] = cert_file
+                            cert['keyFile'] = key_file
+                            logging.info(f'Inbound {row_id} ({remark}) invalid path fixed: {old_cert} → {cert_file}')
+                        else:
+                            logging.info(f'Inbound {row_id} ({remark}) cert paths valid — skipping')
+                            continue
 
                 stream['tlsSettings']['certificates'] = certs
                 cursor.execute(
@@ -126,7 +140,6 @@ def update_xray_inbounds(db_path, extracted):
         logging.error(f'Failed to connect to database: {e}')
 
     return updated_any
-
 
 def docker_request(method, path, body=None):
     try:
@@ -194,7 +207,7 @@ def stream_container_logs(extracted_ref, stop_event):
             sock.connect(DOCKER_SOCK)
             sock.settimeout(5)
 
-            since = int(time.time())
+            since = int(time.time()) - 30  # look back 30 seconds on reconnect
             request = (
                 f'GET /containers/{CONTAINER_NAME}/logs'
                 f'?follow=1&stdout=1&stderr=1&tail=0&since={since} HTTP/1.1\r\n'
