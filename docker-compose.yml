@@ -39,13 +39,13 @@ services:
     container_name: traefik
     restart: unless-stopped
     command:
-      - --api.dashboard=true
-      - --api.insecure=true
+      # - --api.dashboard=true
+      # - --api.insecure=true
       - --log.level=INFO
       - --accesslog=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
+      # - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
       - --entrypoints.xray443.address=:8443
       - --certificatesresolvers.letsencrypt.acme.email=rujhanbheem123@gmail.com
@@ -54,10 +54,10 @@ services:
       - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
     ports:
-      - "80:80"
+      # - "80:80"
       - "443:443"
       - "8443:8443"
-      - "8080:8080"
+      # - "8080:8080"
     networks:
       - traefikproxy
     volumes:
