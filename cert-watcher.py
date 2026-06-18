@@ -20,7 +20,12 @@ DB_PATH = '/app/db/x-ui.db'
 DOCKER_SOCK = '/var/run/docker.sock'
 CONTAINER_NAME = '3xui_app'
 ACME_CHECK_INTERVAL = 3600
-ERROR_TRIGGER = 'failed to parse certificate'
+# With this
+ERROR_TRIGGERS = [
+    'failed to parse certificate',
+    'both file and bytes are empty',
+    'failed to build TLS config',
+]
 
 
 def get_file_hash(path):
@@ -223,7 +228,7 @@ def stream_container_logs(extracted_ref, stop_event):
                             logging.debug(f'3xui: {log_line}')
 
                         # React to cert error
-                        if ERROR_TRIGGER in log_line:
+                        if any(trigger in log_line for trigger in ERROR_TRIGGERS):
                             now = time.time()
                             if now - last_fix_time > cooldown:
                                 logging.warning(f'Cert error detected: {log_line}')
