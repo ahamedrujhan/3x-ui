@@ -169,7 +169,7 @@ def restart_3xui():
         logging.info('3xui_app restart triggered successfully')
     else:
         logging.warning(f'Unexpected restart response: {response[:100]}')
-        
+
 def get_container_id():
     """Get container ID for log streaming"""
     try:
@@ -182,6 +182,86 @@ def get_container_id():
 
 
 def stream_container_logs(extracted_ref, stop_event):
+    logging.info('Starting log watcher for 3xui_app...')
+    last_fix_time = 0
+    cooldown = 60  # increase to 60 seconds
+
+    while not stop_event.is_set():
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(DOCKER_SOCK)
+            sock.settimeout(60)
+
+            # Use since= to only get logs from NOW, not buffered old logs
+            since = int(time.time())
+            request = (
+                f'GET /containers/{CONTAINER_NAME}/logs'
+                f'?follow=1&stdout=1&stderr=1&tail=0&since={since} HTTP/1.1\r\n'
+                f'Host: localhost\r\n\r\n'
+            )
+            sock.sendall(request.encode())
+
+            # Skip HTTP headers
+            header = b''
+            while b'\r\n\r\n' not in header:
+                header += sock.recv(1)
+
+            status_line = header.decode(errors='ignore').split('\r\n')[0]
+            logging.info(f'Docker log stream response: {status_line}')
+
+            is_multiplexed = 'multiplexed' in header.decode(errors='ignore').lower()
+            logging.info(f'Stream type: {"multiplexed" if is_multiplexed else "raw"} (since={since})')
+            logging.info('Connected to 3xui_app log stream — watching for cert errors...')
+
+            buffer = b''
+            while not stop_event.is_set():
+                try:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+
+                    while b'\n' in buffer:
+                        line, buffer = buffer.split(b'\n', 1)
+                        log_line = line.decode(errors='ignore').strip()
+
+                        if is_multiplexed and len(line) > 8:
+                            try:
+                                frame_size = int.from_bytes(line[4:8], 'big')
+                                log_line = line[8:8 + frame_size].decode(errors='ignore').strip()
+                            except Exception:
+                                pass
+
+                        if not log_line:
+                            continue
+
+                        logging.debug(f'3xui: {log_line}')
+
+                        if any(trigger in log_line for trigger in ERROR_TRIGGERS):
+                            now = time.time()
+                            if now - last_fix_time > cooldown:
+                                logging.warning(f'Cert error detected: {log_line}')
+                                logging.info('Fixing cert paths and restarting 3xui...')
+                                time.sleep(2)
+                                updated = update_xray_inbounds(DB_PATH, extracted_ref['data'])
+                                if updated:
+                                    restart_3xui()
+                                    # Update since so reconnect skips old logs
+                                    since = int(time.time())
+                                last_fix_time = time.time()
+                            else:
+                                logging.info(f'Cert error detected but in cooldown ({int(cooldown - (time.time() - last_fix_time))}s remaining) — skipping')
+
+                except socket.timeout:
+                    continue
+
+            sock.close()
+            # Reconnect with updated since timestamp
+            logging.info('Log stream disconnected — reconnecting...')
+
+        except Exception as e:
+            logging.error(f'Log stream error: {e}')
+            time.sleep(5)
     logging.info('Starting log watcher for 3xui_app...')
     last_fix_time = 0
     cooldown = 30
