@@ -133,7 +133,7 @@ def docker_request(method, path, body=None):
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(DOCKER_SOCK)
-        sock.settimeout(10)
+        sock.settimeout(30)  # increase from 10 to 30 seconds
 
         headers = f'{method} {path} HTTP/1.1\r\nHost: localhost\r\n'
         if body:
@@ -145,11 +145,14 @@ def docker_request(method, path, body=None):
             sock.sendall(body.encode())
 
         response = b''
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            response += chunk
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        except socket.timeout:
+            pass  # timeout is ok for restart — response may not come back
 
         sock.close()
         return response.decode(errors='ignore')
@@ -161,12 +164,12 @@ def docker_request(method, path, body=None):
 def restart_3xui():
     logging.info('Restarting 3xui_app...')
     response = docker_request('POST', f'/containers/{CONTAINER_NAME}/restart')
-    if '204' in response:
-        logging.info('3xui_app restarted successfully')
+    if '204' in response or response == '':
+        # Empty response is ok — container restart kills the connection
+        logging.info('3xui_app restart triggered successfully')
     else:
         logging.warning(f'Unexpected restart response: {response[:100]}')
-
-
+        
 def get_container_id():
     """Get container ID for log streaming"""
     try:
