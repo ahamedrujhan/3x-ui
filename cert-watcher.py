@@ -7,7 +7,6 @@ import logging
 import sqlite3
 import socket
 import threading
-import urllib.request
 from collections import deque
 
 logging.basicConfig(
@@ -171,14 +170,11 @@ def restart_3xui():
 
 
 def process_queue(queue, extracted_ref):
-    """Process all queued tags — fix DB once and restart once"""
     if not queue:
         return
-
     tags = set()
     while queue:
         tags.add(queue.popleft())
-
     logging.info(f'Processing queued errors for tags: {tags}')
     updated = update_xray_inbounds(DB_PATH, extracted_ref['data'])
     if updated:
@@ -190,13 +186,13 @@ def stream_container_logs(extracted_ref, stop_event):
 
     in_cooldown = False
     cooldown_until = 0
-    queue = deque()  # queued tags detected during cooldown
+    queue = deque()
 
     while not stop_event.is_set():
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(DOCKER_SOCK)
-            sock.settimeout(60)
+            sock.settimeout(5)
 
             since = int(time.time())
             request = (
@@ -206,86 +202,78 @@ def stream_container_logs(extracted_ref, stop_event):
             )
             sock.sendall(request.encode())
 
+            # Skip HTTP headers
             header = b''
             while b'\r\n\r\n' not in header:
                 header += sock.recv(1)
 
             status_line = header.decode(errors='ignore').split('\r\n')[0]
-            logging.info(f'Docker log stream: {status_line}')
-            is_multiplexed = 'multiplexed' in header.decode(errors='ignore').lower()
-            logging.info('Connected to 3xui_app log stream — watching for cert errors...')
+            is_chunked = 'chunked' in header.decode(errors='ignore').lower()
+            logging.info(f'Log stream: {status_line} | chunked={is_chunked}')
+            logging.info('Connected to 3xui_app log stream')
 
             buffer = b''
             while not stop_event.is_set():
-                try:
-                    # Check if cooldown expired and queue has items
-                    now = time.time()
-                    if in_cooldown and now >= cooldown_until:
-                        in_cooldown = False
-                        logging.info('Cooldown expired')
-                        if queue:
-                            logging.info(f'Processing {len(queue)} queued error(s)...')
-                            process_queue(queue, extracted_ref)
-                            cooldown_until = time.time() + COOLDOWN
-                            in_cooldown = True
 
+                # Check cooldown expiry
+                now = time.time()
+                if in_cooldown and now >= cooldown_until:
+                    in_cooldown = False
+                    logging.info('Cooldown expired')
+                    if queue:
+                        logging.info(f'Processing {len(queue)} queued error(s)...')
+                        process_queue(queue, extracted_ref)
+                        cooldown_until = time.time() + COOLDOWN
+                        in_cooldown = True
+
+                try:
                     chunk = sock.recv(4096)
                     if not chunk:
                         break
                     buffer += chunk
-
-                    while b'\n' in buffer:
-                        line, buffer = buffer.split(b'\n', 1)
-                        log_line = line.decode(errors='ignore').strip()
-
-                        if is_multiplexed and len(line) > 8:
-                            try:
-                                frame_size = int.from_bytes(line[4:8], 'big')
-                                log_line = line[8:8 + frame_size].decode(errors='ignore').strip()
-                            except Exception:
-                                pass
-
-                        if not log_line:
-                            continue
-
-                        logging.debug(f'3xui: {log_line}')
-
-                        if any(trigger in log_line for trigger in ERROR_TRIGGERS):
-                            # Extract inbound tag
-                            tag = 'unknown'
-                            for part in log_line.split():
-                                if part.startswith('in-'):
-                                    tag = part.rstrip('>')
-                                    break
-
-                            if not in_cooldown:
-                                logging.warning(f'Cert error detected [{tag}] — fixing...')
-                                time.sleep(2)
-                                updated = update_xray_inbounds(DB_PATH, extracted_ref['data'])
-                                if updated:
-                                    restart_3xui()
-                                cooldown_until = time.time() + COOLDOWN
-                                in_cooldown = True
-                            else:
-                                remaining = int(cooldown_until - time.time())
-                                if tag not in queue:
-                                    queue.append(tag)
-                                    logging.info(f'Queued error [{tag}] — cooldown {remaining}s remaining, queue size: {len(queue)}')
-                                else:
-                                    logging.debug(f'Tag [{tag}] already in queue — skipping duplicate')
-
                 except socket.timeout:
-                    # Use timeout to check cooldown expiry
-                    now = time.time()
-                    if in_cooldown and now >= cooldown_until:
-                        in_cooldown = False
-                        logging.info('Cooldown expired')
-                        if queue:
-                            logging.info(f'Processing {len(queue)} queued error(s)...')
-                            process_queue(queue, extracted_ref)
+                    continue
+
+                # Process lines
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    log_line = line.decode(errors='ignore').strip()
+
+                    if not log_line:
+                        continue
+
+                    # Skip chunked transfer size lines (hex numbers)
+                    try:
+                        int(log_line, 16)
+                        continue
+                    except ValueError:
+                        pass
+
+                    logging.debug(f'3xui: {log_line}')
+
+                    if any(trigger in log_line for trigger in ERROR_TRIGGERS):
+                        tag = 'unknown'
+                        for part in log_line.split():
+                            if part.startswith('in-'):
+                                tag = part.rstrip('>')
+                                break
+
+                        now = time.time()
+                        if not in_cooldown:
+                            logging.warning(f'Cert error detected [{tag}] — fixing...')
+                            time.sleep(2)
+                            updated = update_xray_inbounds(DB_PATH, extracted_ref['data'])
+                            if updated:
+                                restart_3xui()
                             cooldown_until = time.time() + COOLDOWN
                             in_cooldown = True
-                    continue
+                        else:
+                            remaining = int(cooldown_until - now)
+                            if tag not in queue:
+                                queue.append(tag)
+                                logging.info(f'Queued [{tag}] — {remaining}s remaining, queue: {list(queue)}')
+                            else:
+                                logging.debug(f'[{tag}] already queued')
 
             sock.close()
             logging.info('Log stream disconnected — reconnecting...')
@@ -310,7 +298,6 @@ def main():
     update_xray_inbounds(DB_PATH, extracted)
 
     extracted_ref = {'data': extracted}
-
     last_acme_hash = get_file_hash(ACME_PATH)
     last_acme_check = time.time()
 
